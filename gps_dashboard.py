@@ -443,6 +443,45 @@ def status_card(title, value):
     )
 
 
+def meshtastic_switch_style(enabled):
+    return {
+        "display": "inline-flex",
+        "alignItems": "center",
+        "gap": "12px",
+        "padding": "8px 12px",
+        "border": "1px solid #bbb",
+        "borderRadius": "999px",
+        "background": "#eefaf2" if enabled else "#f4f4f4",
+        "cursor": "pointer",
+    }
+
+
+def meshtastic_switch_track_style(enabled):
+    return {
+        "width": "44px",
+        "height": "24px",
+        "borderRadius": "999px",
+        "background": "#22c55e" if enabled else "#9ca3af",
+        "position": "relative",
+        "transition": "background 0.15s ease",
+        "flexShrink": 0,
+    }
+
+
+def meshtastic_switch_handle_style(enabled):
+    return {
+        "position": "absolute",
+        "top": "3px",
+        "left": "23px" if enabled else "3px",
+        "width": "18px",
+        "height": "18px",
+        "borderRadius": "50%",
+        "background": "white",
+        "boxShadow": "0 1px 2px rgba(0,0,0,0.2)",
+        "transition": "left 0.15s ease",
+    }
+
+
 app = Dash(__name__)
 
 default_center = [43.0, -79.0]
@@ -727,45 +766,6 @@ def update_dashboard(_):
             f"Alt: {snapshot['altitude_m']} m",
         ]
     )
-
-
-def meshtastic_switch_style(enabled):
-    return {
-        "display": "inline-flex",
-        "alignItems": "center",
-        "gap": "12px",
-        "padding": "8px 12px",
-        "border": "1px solid #bbb",
-        "borderRadius": "999px",
-        "background": "#eefaf2" if enabled else "#f4f4f4",
-        "cursor": "pointer",
-    }
-
-
-def meshtastic_switch_track_style(enabled):
-    return {
-        "width": "44px",
-        "height": "24px",
-        "borderRadius": "999px",
-        "background": "#22c55e" if enabled else "#9ca3af",
-        "position": "relative",
-        "transition": "background 0.15s ease",
-        "flexShrink": 0,
-    }
-
-
-def meshtastic_switch_handle_style(enabled):
-    return {
-        "position": "absolute",
-        "top": "3px",
-        "left": "23px" if enabled else "3px",
-        "width": "18px",
-        "height": "18px",
-        "borderRadius": "50%",
-        "background": "white",
-        "boxShadow": "0 1px 2px rgba(0,0,0,0.2)",
-        "transition": "left 0.15s ease",
-    }
 
     debug = (
         f"PORT: {PORT}\n"
