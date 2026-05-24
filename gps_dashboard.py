@@ -1,17 +1,19 @@
 import threading
 import time
 from collections import deque
+from datetime import datetime
 
 import meshtastic.serial_interface
 import serial
 import serial.tools.list_ports
+from pubsub import pub
 
 from dash import Dash, html, dcc
 from dash.dependencies import Input, Output, State
 import dash_leaflet as dl
 
 
-PORT = "COM6"
+PORT = "COM4"
 BAUD = 420000
 MESHTASTIC_PORT = "COM5"
 MESHTASTIC_CHANNEL_INDEX = 0
@@ -68,9 +70,12 @@ latest = {
     "meshtastic_error": "",
     "meshtastic_last_result": "",
     "meshtastic_template": DEFAULT_MESSAGE_TEMPLATE,
+    "meshtastic_last_received": None,
+    "meshtastic_receive_count": 0,
 }
 
 recent_points = deque(maxlen=500)
+recent_meshtastic_messages = deque(maxlen=100)
 latest_lock = threading.Lock()
 meshtastic_lock = threading.Lock()
 meshtastic_interface = None
@@ -268,6 +273,54 @@ class _TemplateVars(dict):
         return "{" + key + "}"
 
 
+def format_message_timestamp(timestamp):
+    if not timestamp:
+        return "--:--:--"
+    return datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+
+
+def extract_meshtastic_text(packet):
+    decoded = packet.get("decoded") or {}
+    text = decoded.get("text")
+    if text:
+        return text
+
+    payload = decoded.get("payload")
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+    if isinstance(payload, str):
+        return payload
+    return ""
+
+
+def on_meshtastic_text(packet, interface):
+    global meshtastic_interface
+
+    if interface is not meshtastic_interface:
+        return
+
+    if packet.get("channel") not in (None, MESHTASTIC_CHANNEL_INDEX):
+        return
+
+    text = extract_meshtastic_text(packet).strip()
+    if not text:
+        return
+
+    now = packet.get("rxTime") or time.time()
+    sender = packet.get("fromId") or packet.get("from") or "unknown"
+
+    with latest_lock:
+        recent_meshtastic_messages.append(
+            {
+                "timestamp": now,
+                "sender": str(sender),
+                "text": text,
+            }
+        )
+        latest["meshtastic_last_received"] = now
+        latest["meshtastic_receive_count"] += 1
+
+
 def close_meshtastic_interface():
     global meshtastic_interface
 
@@ -305,6 +358,18 @@ def send_meshtastic_text(message: str):
         except Exception:
             close_meshtastic_interface()
             raise
+
+
+def meshtastic_listener_worker():
+    while True:
+        try:
+            with meshtastic_lock:
+                get_meshtastic_interface()
+            time.sleep(2)
+        except Exception as e:
+            with latest_lock:
+                latest["meshtastic_error"] = repr(e)
+            time.sleep(2)
 
 
 def meshtastic_sender_worker():
@@ -580,26 +645,66 @@ app.layout = html.Div(
 
         html.Div(
             [
-                dl.Map(
-                    id="map",
-                    center=default_center,
-                    zoom=13,
-                    children=[
-                        dl.TileLayer(),
-                        dl.Marker(
-                            id="drone-marker",
-                            position=default_center,
+                html.Div(
+                    [
+                        dl.Map(
+                            id="map",
+                            center=default_center,
+                            zoom=13,
                             children=[
-                                dl.Tooltip("Drone"),
-                                dl.Popup(id="marker-popup"),
+                                dl.TileLayer(),
+                                dl.Marker(
+                                    id="drone-marker",
+                                    position=default_center,
+                                    children=[
+                                        dl.Tooltip("Drone"),
+                                        dl.Popup(id="marker-popup"),
+                                    ],
+                                ),
+                                dl.Polyline(id="trail", positions=[]),
                             ],
-                        ),
-                        dl.Polyline(id="trail", positions=[]),
+                            style={"height": "600px", "width": "100%", "borderRadius": "12px"},
+                        )
                     ],
-                    style={"height": "600px", "width": "100%", "borderRadius": "12px"},
-                )
+                    style={
+                        "flex": "2 1 640px",
+                        "border": "1px solid #ddd",
+                        "borderRadius": "12px",
+                        "overflow": "hidden",
+                        "background": "white",
+                    },
+                ),
+                html.Div(
+                    [
+                        html.H3("Meshtastic Public Chat", style={"marginTop": 0}),
+                        html.Div(
+                            id="chat-window",
+                            style={
+                                "height": "600px",
+                                "overflowY": "auto",
+                                "display": "flex",
+                                "flexDirection": "column",
+                                "gap": "10px",
+                            },
+                        ),
+                    ],
+                    style={
+                        "flex": "1 1 320px",
+                        "padding": "14px",
+                        "border": "1px solid #ddd",
+                        "borderRadius": "12px",
+                        "background": "white",
+                        "boxShadow": "0 1px 4px rgba(0,0,0,0.08)",
+                    },
+                ),
             ],
-            style={"border": "1px solid #ddd", "borderRadius": "12px", "overflow": "hidden"},
+            style={
+                "display": "flex",
+                "flexWrap": "wrap",
+                "gap": "12px",
+                "alignItems": "stretch",
+                "marginBottom": "12px",
+            },
         ),
 
         html.H3("Raw / Debug"),
@@ -701,12 +806,14 @@ def trigger_debug_send(n_clicks):
     Output("drone-marker", "position"),
     Output("marker-popup", "children"),
     Output("trail", "positions"),
+    Output("chat-window", "children"),
     Output("debug", "children"),
     Input("tick", "n_intervals"),
 )
 def update_dashboard(_):
     with latest_lock:
         snapshot = dict(latest)
+        chat_snapshot = list(recent_meshtastic_messages)
 
     lat = snapshot["lat"]
     lon = snapshot["lon"]
@@ -767,6 +874,45 @@ def update_dashboard(_):
         ]
     )
 
+    chat_items = []
+    for message in reversed(chat_snapshot):
+        chat_items.append(
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span(message["sender"], style={"fontWeight": "bold"}),
+                            html.Span(
+                                format_message_timestamp(message["timestamp"]),
+                                style={"fontSize": "12px", "color": "#666"},
+                            ),
+                        ],
+                        style={
+                            "display": "flex",
+                            "justifyContent": "space-between",
+                            "gap": "12px",
+                            "marginBottom": "4px",
+                        },
+                    ),
+                    html.Div(message["text"], style={"whiteSpace": "pre-wrap"}),
+                ],
+                style={
+                    "padding": "10px 12px",
+                    "border": "1px solid #e5e7eb",
+                    "borderRadius": "10px",
+                    "background": "#f8fafc",
+                },
+            )
+        )
+
+    if not chat_items:
+        chat_items = [
+            html.Div(
+                "No public-channel messages received yet.",
+                style={"color": "#666", "fontStyle": "italic"},
+            )
+        ]
+
     debug = (
         f"PORT: {PORT}\n"
         f"BAUD: {BAUD}\n"
@@ -796,7 +942,9 @@ def update_dashboard(_):
         f"Meshtastic delay: {snapshot['meshtastic_delay_s']} s\n"
         f"Meshtastic template: {snapshot['meshtastic_template']}\n"
         f"Meshtastic sends: {snapshot['meshtastic_send_count']}\n"
+        f"Meshtastic receives: {snapshot['meshtastic_receive_count']}\n"
         f"Meshtastic last attempt: {snapshot['meshtastic_last_attempt']}\n"
+        f"Meshtastic last received: {snapshot['meshtastic_last_received']}\n"
         f"Meshtastic last sent: {snapshot['meshtastic_last_sent']}\n"
         f"Meshtastic last message: {snapshot['meshtastic_last_message']}\n"
         f"Meshtastic last result: {snapshot['meshtastic_last_result']}\n"
@@ -805,12 +953,18 @@ def update_dashboard(_):
         f"Last raw frame:\n{snapshot['raw_frame']}\n"
     )
 
-    return cards, center, marker_pos, popup, list(recent_points), debug
+    return cards, center, marker_pos, popup, list(recent_points), chat_items, debug
+
+
+pub.subscribe(on_meshtastic_text, "meshtastic.receive.text")
 
 
 if __name__ == "__main__":
     t = threading.Thread(target=serial_worker, daemon=True)
     t.start()
+
+    listener = threading.Thread(target=meshtastic_listener_worker, daemon=True)
+    listener.start()
 
     sender = threading.Thread(target=meshtastic_sender_worker, daemon=True)
     sender.start()
