@@ -8,7 +8,7 @@ import serial
 import serial.tools.list_ports
 from pubsub import pub
 
-from dash import Dash, html, dcc
+from dash import Dash, html, dcc, no_update
 from dash.dependencies import Input, Output, State
 import dash_leaflet as dl
 
@@ -360,6 +360,20 @@ def send_meshtastic_text(message: str):
             raise
 
 
+def record_meshtastic_send(message: str, sent_at: float, result_text: str):
+    with latest_lock:
+        latest["meshtastic_last_sent"] = sent_at
+        latest["meshtastic_last_message"] = message
+        latest["meshtastic_send_count"] += 1
+        latest["meshtastic_error"] = ""
+        latest["meshtastic_last_result"] = result_text
+
+
+def record_meshtastic_send_error(error_text: str):
+    with latest_lock:
+        latest["meshtastic_error"] = error_text
+
+
 def meshtastic_listener_worker():
     while True:
         try:
@@ -393,19 +407,10 @@ def meshtastic_sender_worker():
 
         try:
             result_text = send_meshtastic_text(message)
-
-            with latest_lock:
-                latest["meshtastic_last_sent"] = now
-                latest["meshtastic_last_message"] = message
-                latest["meshtastic_send_count"] += 1
-                latest["meshtastic_error"] = ""
-                latest["meshtastic_last_result"] = result_text
+            record_meshtastic_send(message, now, result_text)
 
         except Exception as e:
-            error_text = repr(e)
-
-            with latest_lock:
-                latest["meshtastic_error"] = error_text
+            record_meshtastic_send_error(repr(e))
 
 
 def send_debug_meshtastic_message():
@@ -418,17 +423,9 @@ def send_debug_meshtastic_message():
 
     try:
         result_text = send_meshtastic_text(message)
-        with latest_lock:
-            latest["meshtastic_last_sent"] = now
-            latest["meshtastic_last_message"] = message
-            latest["meshtastic_send_count"] += 1
-            latest["meshtastic_error"] = ""
-            latest["meshtastic_last_result"] = result_text
+        record_meshtastic_send(message, now, result_text)
     except Exception as e:
-        error_text = repr(e)
-
-        with latest_lock:
-            latest["meshtastic_error"] = error_text
+        record_meshtastic_send_error(repr(e))
 
 
 def find_and_process_frames(buffer: bytearray):
@@ -687,6 +684,43 @@ app.layout = html.Div(
                                 "gap": "10px",
                             },
                         ),
+                        html.Div(
+                            [
+                                dcc.Input(
+                                    id="chat-message-input",
+                                    type="text",
+                                    placeholder="Enter a public chat message",
+                                    n_submit=0,
+                                    style={
+                                        "flex": "1 1 auto",
+                                        "padding": "10px 12px",
+                                        "borderRadius": "8px",
+                                        "border": "1px solid #cbd5e1",
+                                    },
+                                ),
+                                html.Button(
+                                    "Send",
+                                    id="chat-send-button",
+                                    n_clicks=0,
+                                    style={
+                                        "padding": "10px 16px",
+                                        "borderRadius": "8px",
+                                        "border": "1px solid #bbb",
+                                        "background": "#f7f7f7",
+                                        "cursor": "pointer",
+                                    },
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "gap": "10px",
+                                "marginTop": "12px",
+                            },
+                        ),
+                        html.Div(
+                            id="chat-send-status",
+                            style={"minHeight": "20px", "marginTop": "8px", "fontSize": "13px"},
+                        ),
                     ],
                     style={
                         "flex": "1 1 320px",
@@ -798,6 +832,56 @@ def update_meshtastic_settings(delay_s, template_text):
 def trigger_debug_send(n_clicks):
     send_debug_meshtastic_message()
     return f"Send debug test message ({n_clicks})"
+
+
+@app.callback(
+    Output("chat-message-input", "value"),
+    Output("chat-send-status", "children"),
+    Output("chat-send-status", "style"),
+    Input("chat-send-button", "n_clicks"),
+    Input("chat-message-input", "n_submit"),
+    State("chat-message-input", "value"),
+    prevent_initial_call=True,
+)
+def send_chat_message(_, __, message_text):
+    message = (message_text or "").strip()
+    if not message:
+        return no_update, "Enter a message to send.", {
+            "minHeight": "20px",
+            "marginTop": "8px",
+            "fontSize": "13px",
+            "color": "#b45309",
+        }
+
+    now = time.time()
+    with latest_lock:
+        latest["meshtastic_last_attempt"] = now
+
+    try:
+        result_text = send_meshtastic_text(message)
+        record_meshtastic_send(message, now, result_text)
+        with latest_lock:
+            recent_meshtastic_messages.append(
+                {
+                    "timestamp": now,
+                    "sender": "You",
+                    "text": message,
+                }
+            )
+        return "", f"Message sent: {result_text}", {
+            "minHeight": "20px",
+            "marginTop": "8px",
+            "fontSize": "13px",
+            "color": "#166534",
+        }
+    except Exception as e:
+        record_meshtastic_send_error(repr(e))
+        return no_update, f"Send failed: {repr(e)}", {
+            "minHeight": "20px",
+            "marginTop": "8px",
+            "fontSize": "13px",
+            "color": "#b91c1c",
+        }
 
 
 @app.callback(
